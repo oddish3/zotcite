@@ -13,6 +13,146 @@ local citation = {
 
 local M = {}
 
+-- Callback for finishing note creation after selecting reference
+local finish_note = function(sel)
+    local zotkey = sel.value.key
+    local vault_path = config.obsidian_vault_path or ""
+    
+    -- Create the note
+    local repl = vim.fn.py3eval('ZotCite.CreateNote("' .. zotkey .. '", "' .. vault_path .. '")')
+    
+    if repl == "" then
+        zwarn("Failed to create note.")
+    else
+        vim.schedule(function() 
+            vim.api.nvim_echo({ { "Created note: " .. repl } }, false, {})
+            
+            -- Insert wiki link if configured to do so
+            if config.insert_obsidian_link then
+                -- Get the filename without the path
+                local filename = vim.fn.fnamemodify(repl, ":t:r")
+                
+                -- Create Obsidian wiki link
+                local wiki_link = "[[" .. filename .. "]]"
+                
+                -- Insert at cursor position
+                local pos = vim.api.nvim_win_get_cursor(0)
+                local row, col = pos[1] - 1, pos[2]
+                vim.api.nvim_buf_set_text(0, row, col, row, col, { wiki_link })
+            end
+            
+            -- Open the note in a new split if desired
+            if vim.fn.confirm("Open the note?", "&Yes\n&No", 2) == 1 then
+                vim.cmd("split " .. repl)
+            end
+        end)
+    end
+end
+
+-- Callback for finishing field insertion after selecting reference
+local finish_insert_field = function(sel, field)
+    local zotkey = sel.value.key
+    local repl = vim.fn.py3eval('ZotCite.GetRefData("' .. zotkey .. '")')
+    
+    if not repl then
+        zwarn("Citation key not found.")
+        return
+    end
+    
+    if not repl[field] then
+        zwarn("Field '" .. field .. "' not found for this reference.")
+        return
+    end
+    
+    local field_value = repl[field]
+    
+    -- Format arrays (like authors) appropriately
+    if type(field_value) == "table" then
+        -- Special handling for author and other creator fields
+        if field == "author" or vim.tbl_contains({ "editor", "seriesEditor", "translator", 
+            "reviewedAuthor", "artist", "performer", "composer", "director", 
+            "podcaster", "cartographer", "programmer", "presenter", 
+            "interviewee", "interviewer", "recipient", "sponsor", "inventor" }, field) then
+            local names = {}
+            for _, name in ipairs(field_value) do
+                table.insert(names, name[1] .. ", " .. name[2])
+            end
+            field_value = table.concat(names, "; ")
+        else
+            field_value = vim.inspect(field_value):gsub("%s+", " ")
+        end
+    end
+    
+    -- Insert the field at cursor position
+    local pos = vim.api.nvim_win_get_cursor(0)
+    local row, col = pos[1] - 1, pos[2]
+    vim.api.nvim_buf_set_text(0, row, col, row, col, { tostring(field_value) })
+end
+
+-- Generic function to insert field from reference
+-- If key is provided, use seek.refs to find a matching reference
+-- If no key is provided but cursor is on a citation key, use that directly
+M.insert_field = function(args)
+    local parts = vim.split(args, " ", { plain = true })
+    local field = parts[1]
+    local key = parts[2] or ""
+    
+    if not field or field == "" then
+        zwarn("Field name is required. Usage: Zinsert <field_name> [search_term]")
+        return
+    end
+    
+    if key ~= "" then
+        -- Use telescope to select a reference
+        seek.refs(key, function(sel) finish_insert_field(sel, field) end)
+    else
+        -- Try to get the citation key under cursor
+        local wrd = M.citation_key()
+        if wrd ~= "" then
+            local repl = vim.fn.py3eval('ZotCite.GetRefData("' .. wrd .. '")')
+            if not repl then
+                zwarn("Citation key not found.")
+            elseif not repl[field] then
+                zwarn("Field '" .. field .. "' not found for this reference.")
+            else
+                local field_value = repl[field]
+                
+                -- Format arrays (like authors) appropriately
+                if type(field_value) == "table" then
+                    -- Special handling for author and other creator fields
+                    if field == "author" or vim.tbl_contains({ "editor", "seriesEditor", "translator", 
+                        "reviewedAuthor", "artist", "performer", "composer", "director", 
+                        "podcaster", "cartographer", "programmer", "presenter", 
+                        "interviewee", "interviewer", "recipient", "sponsor", "inventor" }, field) then
+                        local names = {}
+                        for _, name in ipairs(field_value) do
+                            table.insert(names, name[1] .. ", " .. name[2])
+                        end
+                        field_value = table.concat(names, "; ")
+                    else
+                        field_value = vim.inspect(field_value):gsub("%s+", " ")
+                    end
+                end
+                
+                -- Insert the field at cursor position
+                local pos = vim.api.nvim_win_get_cursor(0)
+                local row, col = pos[1] - 1, pos[2]
+                vim.api.nvim_buf_set_text(0, row, col, row, col, { tostring(field_value) })
+            end
+        else
+            -- No citation key under cursor, fallback to telescope
+            seek.refs("", function(sel) finish_insert_field(sel, field) end)
+        end
+    end
+end
+
+-- Create a note from a reference by always opening Telescope
+M.create_note = function(key)
+    -- If a key/search term is passed, use it. Otherwise, open with an empty prompt.
+    local search_term = key or ""
+    seek.refs(search_term, finish_note)
+end
+
 local TranslateZPath = function(strg)
     local fpath = strg
 
